@@ -32,6 +32,12 @@ import {
   OPENPI_TOOL_SURFACE,
   patchOwnedTools,
 } from "../shared/tool-surface.ts";
+import { completionOwnerFor } from "../shared/completion-inbox.ts";
+import {
+  projectBackgroundTerminalDetail,
+  projectBackgroundTerminalCapability,
+  registerWebCapability,
+} from "../shared/web-observer-registry.ts";
 import type { TerminalSnapshot } from "./src/domain.ts";
 import {
   MAX_RUNNING,
@@ -95,11 +101,18 @@ interface WatchToolDetails {
 export default function (pi: ExtensionAPI) {
   let runtime: TerminalRuntime | undefined;
   let managerPromise: Promise<TerminalManagerShape> | undefined;
+  let managerForHooks: TerminalManagerShape | undefined;
+  let unregisterWebCapability: (() => void) | undefined;
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
   let startReservations = 0;
-  const resultDelivery = createDeferredResultDelivery<TerminalSnapshot>();
+  const resultDelivery = createDeferredResultDelivery<TerminalSnapshot>({
+    owner: () =>
+      sessionContext
+        ? completionOwnerFor(sessionContext.sessionManager)
+        : undefined,
+  });
   const hideLifecycleTools = () =>
     patchOwnedTools(pi, "background", {
       disable: OPENPI_TOOL_SURFACE.background.deferred,
@@ -115,9 +128,27 @@ export default function (pi: ExtensionAPI) {
 
   /** Resolve the manager service once per runtime and wire the extension hooks. */
   const getManager = () => {
+    const scope = sessionContext?.sessionManager;
     managerPromise ??= getRuntime()
       .runPromise(TerminalManager)
       .then((manager) => {
+        managerForHooks = manager;
+        unregisterWebCapability?.();
+        unregisterWebCapability =
+          scope && sessionContext?.sessionManager === scope
+            ? registerWebCapability(scope, {
+                kind: "background-terminals",
+                snapshot: () =>
+                  projectBackgroundTerminalCapability(manager.view.list()),
+                detail: (id) => {
+                  const terminal = manager.view.get(id);
+                  return terminal
+                    ? projectBackgroundTerminalDetail(terminal)
+                    : undefined;
+                },
+                subscribe: (listener) => manager.view.subscribe(listener),
+              })
+            : undefined;
         manager.view.setOnSettled(onSettled);
         unsubStatus?.();
         unsubStatus = manager.view.subscribe(() => updateWidget(manager));
@@ -214,6 +245,7 @@ export default function (pi: ExtensionAPI) {
         // costing a turn.
         resultDeliveryOptions(wake),
       );
+      for (const snap of snaps) managerForHooks?.view.releaseResult(snap.id);
       return true;
     } catch (error) {
       // Session may be shutting down, but retain the snapshot so any later
@@ -226,6 +258,7 @@ export default function (pi: ExtensionAPI) {
   const flushResults = (wake: boolean) => {
     const snaps = resultDelivery.drain(MAX_RUNNING);
     if (!deliverResults(snaps, wake)) resultDelivery.restore(snaps);
+    else resultDelivery.acknowledge(snaps);
   };
 
   const idleResultBatcher = createIdleResultBatcher({
@@ -253,6 +286,7 @@ export default function (pi: ExtensionAPI) {
       stdout: { ...snap.stdout },
       stderr: { ...snap.stderr },
     });
+    managerForHooks?.view.retainResult(snap.id);
     // Pending settlements remain retractable while busy, so bg_status/bg_kill
     // can consume them before they are committed to context. bg_start applies
     // backpressure across running + pending + reserved work, keeping this map
@@ -310,7 +344,10 @@ export default function (pi: ExtensionAPI) {
     ui = undefined;
     const closing = runtime;
     runtime = undefined;
+    unregisterWebCapability?.();
+    unregisterWebCapability = undefined;
     managerPromise = undefined;
+    managerForHooks = undefined;
     await closing?.dispose();
   });
 
@@ -423,12 +460,16 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
+      const text = buildStatusResult(snap);
       // This status is returning the settlement itself; a pending automatic
       // follow-up for the same settle would be a duplicate.
-      if (snap.status !== "running") resultDelivery.consume([snap.id]);
+      if (snap.status !== "running") {
+        resultDelivery.consume([snap.id]);
+        manager.view.releaseResult(snap.id);
+      }
 
       return {
-        content: [{ type: "text", text: buildStatusResult(snap) }],
+        content: [{ type: "text", text }],
         details: {
           id: snap.id,
           status: snap.status,
@@ -510,6 +551,7 @@ export default function (pi: ExtensionAPI) {
       // via the killInterest consumed flag). Remove any deferred automatic
       // delivery now that this tool returns the final state itself.
       resultDelivery.consume(ids);
+      for (const id of ids) manager.view.releaseResult(id);
 
       return {
         content: [{ type: "text", text: buildKillReport(report) }],

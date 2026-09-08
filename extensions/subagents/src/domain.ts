@@ -31,6 +31,7 @@ export const REASONING_EFFORTS = [
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export type SubagentStatus = "running" | "done" | "error";
+export type SubagentOutcome = "completed" | "failed" | "interrupted";
 
 /** Parent-session context resolved by the tool layer and passed opaquely. */
 export interface ParentContext {
@@ -68,6 +69,8 @@ export interface SpawnTask {
   readonly tools?: readonly string[];
   /** Agent type that supplied the above, for the session label. */
   readonly agentTypeName?: string;
+  /** Optional JSON Schema for one terminating, validated child result. */
+  readonly outputSchema?: unknown;
   /**
    * Isolated git worktree this child runs in, created by the tool layer. The
    * backend only reclaims it when the session scope closes; it does not know
@@ -141,7 +144,11 @@ export interface QueuedMessage {
 // --- Events ------------------------------------------------------------------
 
 export type RunOutcome =
-  | { readonly _tag: "Completed"; readonly finalText: string }
+  | {
+      readonly _tag: "Completed";
+      readonly finalText: string;
+      readonly structuredResult?: StructuredSubagentResult;
+    }
   | {
       readonly _tag: "Failed";
       readonly errorText: string;
@@ -215,20 +222,33 @@ export interface SubagentSnapshot {
   readonly prompt: string;
   readonly cwd: string;
   readonly status: SubagentStatus;
+  readonly outcome?: SubagentOutcome;
+  readonly worktreeBranch?: string;
   readonly createdAt: number;
   readonly settledAt?: number;
   readonly errorText?: string;
   readonly meta: SubagentMeta;
   readonly usage: { readonly tokens?: number; readonly contextWindow?: number };
   readonly transcript: ReadonlyArray<TranscriptItem>;
+  /** Monotonic version bumped on every transcript mutation (see manager). */
+  readonly transcriptVersion: number;
   /** Streaming assistant buffers, cleared when the finalized message lands. */
   readonly liveAssistant?: { readonly text: string; readonly thinking: string };
   readonly liveTools: ReadonlyArray<LiveToolState>;
   readonly queued: ReadonlyArray<QueuedMessage>;
   /** Final text of the most recent completed run (v1 `finalOutput`). */
   readonly finalText: string;
+  /** Present only when this run supplied and satisfied output_schema. */
+  readonly structuredResult?: StructuredSubagentResult;
   /** Count of finalized assistant messages (for subagent_check). */
   readonly turns: number;
+}
+
+export interface StructuredSubagentResult {
+  readonly value: unknown;
+  readonly json: string;
+  readonly byteLength: number;
+  readonly artifactPath: string;
 }
 
 /** Final text, or the live streaming buffer while a run is active (v1 `latestOutput`). */

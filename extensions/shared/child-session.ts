@@ -2,7 +2,6 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  type AgentSession,
   DefaultPackageManager,
   DefaultResourceLoader,
   getAgentDir,
@@ -13,6 +12,11 @@ import {
   type SessionShutdownEvent,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import {
+  OPENPI_OWNER_SOURCE_PATHS,
+  OPENPI_TOOL_SURFACE,
+  type OpenPiToolOwner,
+} from "./tool-surface.ts";
 
 export const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -169,9 +173,6 @@ function packageSourceValue(source: PackageSource) {
 
 const CHILD_DISABLED_OPENPI_EXTENSION =
   "-extensions/git-info/index.ts" as const;
-const OPENPI_GIT_INFO_EXTENSION_PATH = realpathSync.native(
-  fileURLToPath(new URL("../git-info/index.ts", import.meta.url)),
-);
 
 function canonicalExistingPath(value: string) {
   try {
@@ -181,15 +182,38 @@ function canonicalExistingPath(value: string) {
   }
 }
 
+/**
+ * ENOENT means git-info is truly absent (trimmed fork, partial install):
+ * nothing to exclude. Any other failure (permissions, symlink loops) means we
+ * cannot verify the Git-polling extension is present, so fail closed instead
+ * of running a child with an unverifiable extension.
+ */
+export function resolveGitInfoPathOrThrow(
+  resolve: (value: string) => string = realpathSync.native,
+): string | undefined {
+  try {
+    return resolve(
+      fileURLToPath(new URL("../git-info/index.ts", import.meta.url)),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
 function excludeOpenPiGitInfoExtension(
   resources: LoadExtensionsResult,
+  resolve: (value: string) => string = realpathSync.native,
 ): LoadExtensionsResult {
+  const gitInfoPath = resolveGitInfoPathOrThrow(resolve);
+  // undefined = absent (ENOENT): nothing to exclude. Non-ENOENT failures
+  // throw from resolveGitInfoPathOrThrow and fail child creation upstream.
+  if (gitInfoPath === undefined) return resources;
   return {
     ...resources,
     extensions: resources.extensions.filter(
       (extension) =>
-        canonicalExistingPath(extension.resolvedPath) !==
-        OPENPI_GIT_INFO_EXTENSION_PATH,
+        canonicalExistingPath(extension.resolvedPath) !== gitInfoPath,
     ),
   };
 }
@@ -249,6 +273,9 @@ function piMatchesPublishedOpenPiSource(options: {
   });
   return (
     packageManager.removeSourceFromSettings("npm:@tt-a1i/openpi") ||
+    packageManager.removeSourceFromSettings(
+      "git:https://github.com/openpi-dev/openpi",
+    ) ||
     packageManager.removeSourceFromSettings(
       "git:https://github.com/tt-a1i/openpi",
     )
@@ -468,6 +495,42 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
   "context_pivot",
 ] as const;
 
+const PARENT_ONLY_OPENPI_EXTENSION_PATHS = new Set(
+  (Object.keys(OPENPI_TOOL_SURFACE) as OpenPiToolOwner[])
+    .filter((owner) => {
+      const { entry, deferred } = OPENPI_TOOL_SURFACE[owner];
+      const toolNames = [...entry, ...deferred];
+      return (
+        toolNames.length > 0 &&
+        toolNames.every((name) =>
+          CHILD_EXCLUDED_TOOL_NAMES.includes(name as never),
+        )
+      );
+    })
+    .map((owner) => canonicalExistingPath(OPENPI_OWNER_SOURCE_PATHS[owner]))
+    .filter(
+      (extensionPath): extensionPath is string => extensionPath !== undefined,
+    ),
+);
+
+function isVerifiedParentOnlyOpenPiExtension(extension: {
+  path: string;
+  resolvedPath: string;
+  sourceInfo: { path: string };
+}) {
+  return [
+    extension.path,
+    extension.resolvedPath,
+    extension.sourceInfo.path,
+  ].some((candidate) => {
+    const canonicalPath = canonicalExistingPath(candidate);
+    return (
+      canonicalPath !== undefined &&
+      PARENT_ONLY_OPENPI_EXTENSION_PATHS.has(canonicalPath)
+    );
+  });
+}
+
 /**
  * Fresh SDK options avoid turning the denylist into an accidental allowlist.
  *
@@ -484,6 +547,20 @@ export const CHILD_EXCLUDED_TOOL_NAMES = [
 export function effectiveChildToolAllowlist(tools?: readonly string[]) {
   return tools?.filter(
     (tool) => !CHILD_EXCLUDED_TOOL_NAMES.includes(tool as never),
+  );
+}
+
+/** Project the parent's active surface into a child; a role can only narrow it.
+ * Active tools are a visibility choice, not a filesystem/network sandbox.
+ * Inactive tools are not implicitly activated by delegation.
+ */
+export function inheritedChildToolAllowlist(
+  parentTools: readonly string[],
+  roleTools?: readonly string[],
+) {
+  const allowed = roleTools === undefined ? undefined : new Set(roleTools);
+  return effectiveChildToolAllowlist([...new Set(parentTools)])!.filter(
+    (name) => allowed === undefined || allowed.has(name),
   );
 }
 
@@ -514,7 +591,15 @@ export async function createChildResources(options: ChildResourceOptions) {
     cwd: options.cwd,
     agentDir,
     settingsManager,
-    extensionsOverride: excludeOpenPiGitInfoExtension,
+    extensionsOverride(base) {
+      const withoutGitInfo = excludeOpenPiGitInfoExtension(base);
+      return {
+        ...withoutGitInfo,
+        extensions: withoutGitInfo.extensions.filter(
+          (extension) => !isVerifiedParentOnlyOpenPiExtension(extension),
+        ),
+      };
+    },
     ...(options.appendSystemPrompt
       ? { appendSystemPrompt: options.appendSystemPrompt }
       : {}),
