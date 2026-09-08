@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyWindowsTerminalCompatibility,
-  installWindowsTerminalCompatibilityListener,
   shouldClearShrunkRows,
 } from "../../../extensions/windows-terminal-compat/index.ts";
 
@@ -18,9 +17,6 @@ test("enables shrink cleanup for the Windows regular renderer", () => {
       },
       setClearOnShrink(value) {
         enabled = value;
-      },
-      addInputListener() {
-        return () => {};
       },
     },
     "win32",
@@ -41,9 +37,6 @@ test("does not change non-Windows or fullscreen rendering", () => {
     },
     setClearOnShrink() {
       calls += 1;
-    },
-    addInputListener() {
-      return () => {};
     },
   };
 
@@ -66,9 +59,6 @@ test("supports an explicit environment opt-out", () => {
       setClearOnShrink() {
         calls += 1;
       },
-      addInputListener() {
-        return () => {};
-      },
     },
     "win32",
     false,
@@ -77,56 +67,61 @@ test("supports an explicit environment opt-out", () => {
   assert.equal(calls, 0);
 });
 
-test("preserves an already enabled or explicitly disabled renderer setting", () => {
+test("preserves an explicit native false renderer setting", () => {
   let calls = 0;
   applyWindowsTerminalCompatibility(
     {
       mode: "regular",
       getClearOnShrink() {
-        return true;
+        return false;
       },
       setClearOnShrink() {
         calls += 1;
       },
-      addInputListener() {
-        return () => {};
-      },
     },
     "win32",
+    false,
   );
   assert.equal(calls, 0);
 });
 
-test("reapplies compatibility when the stable TUI switches to regular mode", () => {
-  let mode: "regular" | "fullscreen" = "fullscreen";
-  let clearOnShrink = false;
+test("reapplies compatibility after renderer replacement", () => {
   let listener: ((data: string) => unknown) | undefined;
-  const remove = installWindowsTerminalCompatibilityListener(
-    {
-      get mode() {
-        return mode;
-      },
-      getClearOnShrink() {
-        return clearOnShrink;
-      },
-      setClearOnShrink(value) {
-        clearOnShrink = value;
-      },
-      addInputListener(value) {
-        listener = value;
-        return () => {
-          listener = undefined;
-        };
-      },
+  const remove = (value: (data: string) => unknown) => {
+    listener = value;
+    return () => {
+      listener = undefined;
+    };
+  };
+  let oldClearOnShrink = false;
+  const oldRenderer = {
+    mode: "fullscreen" as const,
+    getClearOnShrink: () => oldClearOnShrink,
+    setClearOnShrink: (value: boolean) => {
+      oldClearOnShrink = value;
     },
-    "win32",
-  );
-
+  };
+  let newClearOnShrink = false;
+  const newRenderer = {
+    mode: "regular" as const,
+    getClearOnShrink: () => newClearOnShrink,
+    setClearOnShrink: (value: boolean) => {
+      newClearOnShrink = value;
+    },
+  };
+  let current: {
+    mode: "regular" | "fullscreen";
+    getClearOnShrink: () => boolean;
+    setClearOnShrink: (value: boolean) => void;
+  } = oldRenderer;
+  const unsubscribe = remove(() => {
+    applyWindowsTerminalCompatibility(current, "win32");
+  });
   listener?.("input");
-  assert.equal(clearOnShrink, false);
-  mode = "regular";
+  assert.equal(oldClearOnShrink, false);
+  current = newRenderer;
   listener?.("input");
-  assert.equal(clearOnShrink, true);
-  remove();
+  assert.equal(newClearOnShrink, true);
+  unsubscribe();
   assert.equal(listener, undefined);
 });

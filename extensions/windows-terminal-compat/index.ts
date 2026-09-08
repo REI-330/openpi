@@ -13,7 +13,6 @@ type CompatibleTui = {
   mode: "regular" | "fullscreen";
   getClearOnShrink(): boolean;
   setClearOnShrink(enabled: boolean): void;
-  addInputListener(listener: (data: string) => unknown): () => void;
 };
 
 export function shouldClearShrunkRows(
@@ -37,45 +36,42 @@ export function applyWindowsTerminalCompatibility(
   }
 }
 
-export function installWindowsTerminalCompatibilityListener(
-  tui: CompatibleTui,
-  platform: NodeJS.Platform,
-  enabled = true,
-) {
-  return tui.addInputListener(() => {
-    applyWindowsTerminalCompatibility(tui, platform, enabled);
-  });
-}
-
 function install(ctx: ExtensionContext, pi: ExtensionAPI) {
   if (ctx.mode !== "tui") {
     return;
   }
 
-  const removeInputListeners: Array<() => void> = [];
+  const windowsCompatEnabled =
+    process.platform === "win32" && process.env.PI_CLEAR_ON_SHRINK !== "0";
+  let currentTui: CompatibleTui | undefined;
+  const removeInputListener = ctx.ui.onTerminalInput(() => {
+    if (currentTui) {
+      applyWindowsTerminalCompatibility(
+        currentTui,
+        process.platform,
+        windowsCompatEnabled,
+      );
+    }
+  });
   registerEditorLayer(pi, ctx, {
     id: WINDOWS_TERMINAL_COMPAT_LAYER,
     order: 100,
     wrap: (base, tui) => {
+      currentTui = tui;
       // The regular renderer otherwise leaves rows behind when autocomplete
       // shrinks. This is a terminal redraw compatibility setting, not an
       // editor replacement, so all existing input behavior remains intact.
       applyWindowsTerminalCompatibility(
         tui,
         process.platform,
-        process.env.PI_CLEAR_ON_SHRINK !== "0",
+        windowsCompatEnabled,
       );
-      const removeInputListener = installWindowsTerminalCompatibilityListener(
-        tui,
-        process.platform,
-        process.env.PI_CLEAR_ON_SHRINK !== "0",
-      );
-      removeInputListeners.push(removeInputListener);
       return base;
     },
   });
   pi.on("session_shutdown", () => {
-    for (const remove of removeInputListeners) remove();
+    removeInputListener();
+    currentTui = undefined;
   });
 }
 
