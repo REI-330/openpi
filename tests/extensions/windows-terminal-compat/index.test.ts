@@ -122,6 +122,9 @@ test("reapplies compatibility after renderer replacement", () => {
   current = newRenderer;
   listener?.("input");
   assert.equal(newClearOnShrink, true);
+  newClearOnShrink = false;
+  listener?.("input");
+  assert.equal(newClearOnShrink, false);
   unsubscribe();
   assert.equal(listener, undefined);
 });

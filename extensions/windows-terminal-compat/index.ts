@@ -44,8 +44,10 @@ function install(ctx: ExtensionContext, pi: ExtensionAPI) {
   const windowsCompatEnabled =
     process.platform === "win32" && process.env.PI_CLEAR_ON_SHRINK !== "0";
   let currentTui: CompatibleTui | undefined;
+  let lastMode: CompatibleTui["mode"] | undefined;
   const removeInputListener = ctx.ui.onTerminalInput(() => {
-    if (currentTui) {
+    if (currentTui && currentTui.mode !== lastMode) {
+      lastMode = currentTui.mode;
       applyWindowsTerminalCompatibility(
         currentTui,
         process.platform,
@@ -58,6 +60,7 @@ function install(ctx: ExtensionContext, pi: ExtensionAPI) {
     order: 100,
     wrap: (base, tui) => {
       currentTui = tui;
+      lastMode = tui.mode;
       // The regular renderer otherwise leaves rows behind when autocomplete
       // shrinks. This is a terminal redraw compatibility setting, not an
       // editor replacement, so all existing input behavior remains intact.
