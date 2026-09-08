@@ -66,9 +66,8 @@ OpenPI Web theme defaults to `system`; `light` and `dark` are explicit canonical
 
 On Windows, OpenPI enables Pi's `clearOnShrink` compatibility behavior for
 the regular TUI so shrinking slash-command autocomplete lists do not leave
-stale rows on screen. Fullscreen TUI keeps its configured behavior. Set
-`OPENPI_WINDOWS_TUI_COMPAT=0` before starting Pi to opt out of this
-Windows-only adjustment.
+stale rows on screen. Fullscreen TUI keeps its configured behavior. The
+native `PI_CLEAR_ON_SHRINK=0` setting remains an explicit opt-out.
 
 Legacy `footerItems` is accepted and migrated at the input boundary, but new setup writes persist only canonical `footerLines`. Configurations written by this version are not guaranteed to retain their Footer layout when read by an older OpenPI version.
 

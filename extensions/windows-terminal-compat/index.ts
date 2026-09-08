@@ -8,7 +8,13 @@ import {
 } from "../shared/editor-layers.ts";
 
 export const WINDOWS_TERMINAL_COMPAT_LAYER = "windows-terminal-compat";
-export const WINDOWS_TERMINAL_COMPAT_ENV = "OPENPI_WINDOWS_TUI_COMPAT";
+
+type CompatibleTui = {
+  mode: "regular" | "fullscreen";
+  getClearOnShrink(): boolean;
+  setClearOnShrink(enabled: boolean): void;
+  addInputListener(listener: (data: string) => unknown): () => void;
+};
 
 export function shouldClearShrunkRows(
   platform: NodeJS.Platform,
@@ -19,23 +25,34 @@ export function shouldClearShrunkRows(
 }
 
 export function applyWindowsTerminalCompatibility(
-  tui: {
-    mode: "regular" | "fullscreen";
-    setClearOnShrink(enabled: boolean): void;
-  },
+  tui: CompatibleTui,
   platform: NodeJS.Platform,
   enabled = true,
 ) {
-  if (shouldClearShrunkRows(platform, tui.mode, enabled)) {
+  if (
+    shouldClearShrunkRows(platform, tui.mode, enabled) &&
+    !tui.getClearOnShrink()
+  ) {
     tui.setClearOnShrink(true);
   }
 }
 
+export function installWindowsTerminalCompatibilityListener(
+  tui: CompatibleTui,
+  platform: NodeJS.Platform,
+  enabled = true,
+) {
+  return tui.addInputListener(() => {
+    applyWindowsTerminalCompatibility(tui, platform, enabled);
+  });
+}
+
 function install(ctx: ExtensionContext, pi: ExtensionAPI) {
-  if (ctx.mode !== "tui" || process.env[WINDOWS_TERMINAL_COMPAT_ENV] === "0") {
+  if (ctx.mode !== "tui") {
     return;
   }
 
+  const removeInputListeners: Array<() => void> = [];
   registerEditorLayer(pi, ctx, {
     id: WINDOWS_TERMINAL_COMPAT_LAYER,
     order: 100,
@@ -46,10 +63,19 @@ function install(ctx: ExtensionContext, pi: ExtensionAPI) {
       applyWindowsTerminalCompatibility(
         tui,
         process.platform,
-        process.env[WINDOWS_TERMINAL_COMPAT_ENV] !== "0",
+        process.env.PI_CLEAR_ON_SHRINK !== "0",
       );
+      const removeInputListener = installWindowsTerminalCompatibilityListener(
+        tui,
+        process.platform,
+        process.env.PI_CLEAR_ON_SHRINK !== "0",
+      );
+      removeInputListeners.push(removeInputListener);
       return base;
     },
+  });
+  pi.on("session_shutdown", () => {
+    for (const remove of removeInputListeners) remove();
   });
 }
 
